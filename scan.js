@@ -197,7 +197,7 @@ function getVideoMetadata( videoUrl ) {
 		'-show_entries',
 		'format=size,duration,bit_rate:stream=codec_name,codec_type,width,height,r_frame_rate,sample_fmt,channels',
 		'-of', 'json',
-		'"', videoUrl, '"'
+		'"' + videoUrl + '"'
 	].join( ' ' );
 
 	try {
