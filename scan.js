@@ -6,6 +6,8 @@ const { execSync } = require( 'child_process' );
 const { program } = require( 'commander' );
 const cliProgress = require( 'cli-progress' ); // Replace progress with cli-progress
 const { URL } = require( 'url' );
+const { spawn } = require( 'child_process' );
+const createCsvWriter = require('csv-writer').createObjectCsvWriter; // Add csv-writer library
 
 // Detect OS and set Chrome's executable path
 // We need this as the chromium does not have all the media codecs installed
@@ -135,7 +137,7 @@ fs.mkdirSync( OUTPUT_DIR, { recursive: true } );
 
 // Initialize individual progress bars
 const individualProgressBars = new cliProgress.MultiBar( {
-	format: '[ ' + '{bar}'  + ' ] {percentage}% | {value}/{total} | Duration: {duration_formatted} | ETA: {eta_formatted} | {status}',
+	format: '[ ' + '{bar}' + ' ] {percentage}% | {value}/{total} | Duration: {duration_formatted} | ETA: {eta_formatted} | {status}',
 	clearOnComplete: true,
 	hideCursor: true,
 	autopadding: true,
@@ -149,7 +151,7 @@ const progressbars = [];
  */
 function updateProgressBar( progressBar, status, finished = false ) {
 	if ( !progressbars[ progressBar ] ) {
-		progressbars[ progressBar ] = individualProgressBars.create( 16, 0, { task: `Scanning`, status: 'Starting...' } );
+		progressbars[ progressBar ] = individualProgressBars.create( 15, 0, { task: `Scanning`, status: 'Starting...' } );
 	}
 	progressbars[ progressBar ].increment();
 	progressbars[ progressBar ].update( { status } );
@@ -160,9 +162,9 @@ function updateProgressBar( progressBar, status, finished = false ) {
 
 function startProgressBar( progressBar, status ) {
 	if ( !progressbars[ progressBar ] ) {
-		progressbars[ progressBar ] = individualProgressBars.create( 16, 0, { task: `Scanning`, status: 'Starting...' } );
+		progressbars[ progressBar ] = individualProgressBars.create( 15, 0, { task: `Scanning`, status: 'Starting...' } );
 	}
-	progressbars[ progressBar ].start( 16, 0, { status } );
+	progressbars[ progressBar ].start( 15, 0, { status } );
 	progressbars[ progressBar ].increment();
 }
 
@@ -190,73 +192,101 @@ function sanitizeUrlForFilename( url ) {
  * @param {string} videoUrl - The URL or path of the video file.
  * @returns {Object} An object containing video metadata or an error object if retrieval fails.
  */
-function getVideoMetadata( videoUrl ) {
-	let cmd = [
-		'ffprobe',
-		'-v', 'error',
-		'-show_entries',
-		'format=size,duration,bit_rate:stream=codec_name,codec_type,width,height,r_frame_rate,sample_fmt,channels',
-		'-of', 'json',
-		'"' + videoUrl + '"'
-	].join( ' ' );
+/**
+ * Asynchronously retrieves metadata about a video file using ffprobe.
+ * @param {string} videoUrl - The URL or path of the video file.
+ * @returns {Promise<Object>} A promise that resolves to an object containing video metadata or an error object if retrieval fails.
+ */
+async function getVideoMetadata( videoUrl ) {
+	return new Promise( ( resolve ) => {
+		let cmd = [
+			'ffprobe',
+			'-v', 'error',
+			'-show_entries',
+			'format=size,duration,bit_rate:stream=codec_name,codec_type,width,height,r_frame_rate,sample_fmt,channels',
+			'-of', 'json',
+			'"' + videoUrl + '"'
+		];
 
-	try {
-		// Run the ffprobe command and capture its output
-		let result = execSync( cmd, { encoding: 'utf-8', stdio: [ 'ignore', 'pipe', 'ignore' ] } ); // Suppress stderr
-		let data = JSON.parse( result );
+		const ffprobe = spawn( cmd[ 0 ], cmd.slice( 1 ) );
 
-		// Extract the format information
-		let videoFormatInfo = data.format || {};
-		let size = videoFormatInfo.size;
-		let bitRate = parseInt( videoFormatInfo.bit_rate || 0, 10 ); // Keep in bytes
-		let duration = videoFormatInfo.duration || null;
+		let output = '';
+		let errorOutput = '';
 
-		// Initialize variables to store first video track info and audio presence
-		let videoTrack = null;
-		let hasAudio = false;
-		let frameRate = null;
-		let codec = null;
-		let width = null;
-		let height = null;
+		ffprobe.stdout.on( 'data', ( data ) => {
+			output += data.toString();
+		} );
 
-		// Check each stream for type and extract needed details from the first video stream found
-		let streams = data.streams || [];
-		for ( let stream of streams ) {
-			let codecType = stream.codec_type;
+		ffprobe.stderr.on( 'data', ( data ) => {
+			errorOutput += data.toString();
+		} );
 
-			if ( codecType === "video" && !videoTrack ) {
-				videoTrack = true;
-				let [ frameRateNumerator, frameRateDenominator ] = stream.r_frame_rate.split( '/' ).map( Number );
-				frameRate = Math.round( frameRateNumerator / frameRateDenominator * 100 ) / 100;
-				width = stream.width;
-				height = stream.height;
-				codec = stream.codec_name;
+		ffprobe.on( 'close', ( code ) => {
+			if ( code !== 0 || errorOutput ) {
+				resolve( {
+					url: videoUrl,
+					error: true,
+					message: errorOutput.trim(),
+				} );
+				return;
 			}
 
-			if ( codecType === "audio" ) {
-				hasAudio = true;
+			try {
+				let data = JSON.parse( output );
+
+				// Extract the format information
+				let videoFormatInfo = data.format || {};
+				let size = videoFormatInfo.size;
+				let bitRate = parseInt( videoFormatInfo.bit_rate || 0, 10 ); // Keep in bytes
+				let duration = videoFormatInfo.duration || null;
+
+				// Initialize variables to store first video track info and audio presence
+				let videoTrack = null;
+				let hasAudio = false;
+				let frameRate = null;
+				let codec = null;
+				let width = null;
+				let height = null;
+
+				// Check each stream for type and extract needed details from the first video stream found
+				let streams = data.streams || [];
+				for ( let stream of streams ) {
+					let codecType = stream.codec_type;
+
+					if ( codecType === "video" && !videoTrack ) {
+						videoTrack = true;
+						let [ frameRateNumerator, frameRateDenominator ] = stream.r_frame_rate.split( '/' ).map( Number );
+						frameRate = Math.round( frameRateNumerator / frameRateDenominator * 100 ) / 100;
+						width = stream.width;
+						height = stream.height;
+						codec = stream.codec_name;
+					}
+
+					if ( codecType === "audio" ) {
+						hasAudio = true;
+					}
+				}
+
+				// Return both video track metadata and audio presence
+				resolve( {
+					duration,
+					has_audio: hasAudio,
+					bit_rate: bitRate,
+					size,
+					frame_rate: frameRate,
+					width,
+					height,
+					codec,
+				} );
+			} catch ( e ) {
+				resolve( {
+					url: videoUrl,
+					error: true,
+					message: e.message,
+				} );
 			}
-		}
-
-		// Return both video track metadata and audio presence
-		return {
-			// url: videoUrl,
-			duration,
-			has_audio: hasAudio,
-			bit_rate: bitRate,
-			size,
-			frame_rate: frameRate,
-			width,
-			height,
-			codec,
-		};
-
-	} catch ( e ) {
-		return {
-			url: videoUrl,
-			error: true,
-		};
-	}
+		} );
+	} );
 }
 
 /**
@@ -295,31 +325,27 @@ function getBlankSite( url ) {
 	return site;
 }
 
-/**
- * Initializes a CSV file with the specified filename and writes the headers.
- * @param {string} filename - The name of the CSV file to create.
- */
-function initializeCsv( filename ) {
-	let csvHeaders = Object.keys( headers ).join( ',' );
-	fs.writeFileSync( filename, `${ csvHeaders }\n` );
-}
+// Initialize the CSV writer
+const csvWriter = createCsvWriter({
+	path: CSV_FILE,
+	header: Object.keys(headers).map(key => ({ id: key, title: key })),
+	append: false // Overwrite the file if it already exists
+});
 
 /**
- * Appends a row of JSON data to the CSV file.
- * @param {Object} data - The data object to save to the CSV file.
+ * Saves a single record to a CSV file.
+ *
+ * @async
+ * @function saveToCSV
+ * @param {Object} data - The data object to be written to the CSV file.
+ * @returns {Promise<void>} Resolves when the record is successfully written.
  */
-function saveToCSV( data ) {
-	let encodedData = Object.values( data ).map( value => {
-		if ( value === null ) {
-			return ''; // Replace null with an empty string
-		}
-		if ( Array.isArray( value ) || typeof value === 'object' ) {
-			// return JSON.stringify(value); // Encode arrays or objects as JSON strings
-			return `"` + JSON.stringify( value ).replace( /"/g, "'" ) + `"`;
-		}
-		return value; // Keep other values as is
-	} );
-	fs.appendFileSync( CSV_FILE, encodedData.join( "," ) + "\n" );
+async function saveToCSV(data) {
+	try {
+		await csvWriter.writeRecords([data]); // Append a single record
+	} catch (error) {
+		logErrorToFile(`Error writing to CSV: ${error.message}`);
+	}
 }
 
 /**
@@ -511,7 +537,7 @@ async function get_video( page, viewport, url ) {
 
 		let srcMetadata = {};
 		for ( let videoSrc of returnedSrc ) {
-			srcMetadata[ videoSrc ] = getVideoMetadata( videoSrc );
+			srcMetadata[ videoSrc ] = await getVideoMetadata( videoSrc );
 		}
 
 		return {
@@ -599,45 +625,45 @@ async function isVisible( element ) {
  * @returns {Promise<Object>} A promise that resolves to an object containing the page, context, final URL, and any errors.
  * @throws Will throw an error if the page fails to load or the browser instance is not provided.
  */
-async function getWebPage(url, browser, options = {}, modifyPage = null) {
-	return new Promise(async (resolve, reject) => {
-        if (!url) {
-            return reject(new Error('URL is required'));
-        }
-        
-        if (!browser) {
-            return reject(new Error('Browser instance is required'));
-        }
-        
-        const context = await browser.newContext(options);
-        const page = await context.newPage();
-        
-        try {
-            const response = await page.goto(url, { timeout: 60000, waitUntil: 'domcontentloaded' });
-            if (!response) {
-                return reject(new Error('Failed to load page'));
-            }
-            
-            if (response.status() === 404) {
-                return reject(new Error(`Page not found (404): ${url}`));
-            }
-            
-            if (modifyPage && typeof modifyPage === 'function') {
-                await modifyPage(page);
-            }
+async function getWebPage( url, browser, options = {}, modifyPage = null ) {
+	return new Promise( async ( resolve, reject ) => {
+		if ( !url ) {
+			return reject( new Error( 'URL is required' ) );
+		}
+
+		if ( !browser ) {
+			return reject( new Error( 'Browser instance is required' ) );
+		}
+
+		const context = await browser.newContext( options );
+		const page = await context.newPage();
+
+		try {
+			const response = await page.goto( url, { timeout: 60000, waitUntil: 'domcontentloaded' } );
+			if ( !response ) {
+				return reject( new Error( 'Failed to load page' ) );
+			}
+
+			if ( response.status() === 404 ) {
+				return reject( new Error( `Page not found (404): ${ url }` ) );
+			}
+
+			if ( modifyPage && typeof modifyPage === 'function' ) {
+				await modifyPage( page );
+			}
 
 			// Wait for 2 seconds to allow videos to start playing
-			await page.waitForTimeout( 2000 );		
-			            
-            resolve({ page, context, url: page.url(), error: null });
-        } catch (error) {
+			await page.waitForTimeout( 2000 );
+
+			resolve( { page, context, url: page.url(), error: null } );
+		} catch ( error ) {
 			// Ensure the context is closed if an error occurs
 			if ( context ) {
 				await context.close();
 			}
-			reject( error );	        
+			reject( error );
 		}
-    });
+	} );
 }
 
 /**
@@ -730,23 +756,23 @@ async function scanWebsite( url, index ) {
 		} catch ( error ) {
 			if ( error.message.includes( "404" ) ) {
 				site[ 'Error - 404' ] = true;
-				updateProgressBar( overallProgressBar, url + " 404" );
+				// updateProgressBar( overallProgressBar, url + " 404" );
 				updateProgressBar( index, url + " 404" );
-				logErrorToFile( `${ url } - 404 - ${ error.message }` );
-				saveToCSV( site );
+				// logErrorToFile( `${ url } - 404 - ${ error.message }` );
+				// saveToCSV( site );
 				return;
 			} else if ( error.message.includes( "ENOTFOUND" ) || error.message.includes( "ERR_NAME_NOT_RESOLVED" ) || error.message.includes( "NS_ERROR_UNKNOWN_HOST" ) ) {
 				site[ 'Unresolved' ] = true;
-				updateProgressBar( overallProgressBar, url + " Unresolved" );
+				// updateProgressBar( overallProgressBar, url + " Unresolved" );
 				updateProgressBar( index, url + " Unresolved" );
-				logErrorToFile( `${ url } - Unresolved - ${ error.message }` );
-				saveToCSV( site );
+				// logErrorToFile( `${ url } - Unresolved - ${ error.message }` );
+				// saveToCSV( site );
 				return;
 			} else {
 				site[ 'General Error' ] = true;
-				updateProgressBar( overallProgressBar, url + " General Error" );
+				// updateProgressBar( overallProgressBar, url + " General Error" );
 				updateProgressBar( index, url + " General Error" );
-				logErrorToFile( `${ url } - Error during mobile  - ${ error.message }` );
+				// logErrorToFile( `${ url } - Error during mobile  - ${ error.message }` );
 				return;
 			}
 			// logErrorToFile( `Error during mobile scan for ${ url }: ${ error.message }` );
@@ -887,7 +913,6 @@ async function scanWebsite( url, index ) {
 
 		updateProgressBar( index, url + " - " + 'Save' );
 		saveToCSV( site );
-		updateProgressBar( index, url + " - " + 'Done', true );
 		updateProgressBar( overallProgressBar, "Done - " + url );
 	}
 
@@ -978,9 +1003,6 @@ process.on( 'SIGTERM', gracefulShutdown );
 
 	const input = program.args[ 0 ];
 
-	// Initialize the CSV file
-	initializeCsv( CSV_FILE );
-
 	const urls = [];
 	if ( fs.existsSync( input ) ) {
 		urls.push( ...getUrlsFromFile( input ) );
@@ -995,6 +1017,6 @@ process.on( 'SIGTERM', gracefulShutdown );
 	await scanWebsitesConcurrently( urls );
 	updateProgressBar( overallProgressBar, "Complete" );
 	progressbars[ overallProgressBar ].stop();
-	// console.log( "Scanning complete!" );
+	console.log( "Scanning complete!" );
 	process.exit( 0 );
 } )();
