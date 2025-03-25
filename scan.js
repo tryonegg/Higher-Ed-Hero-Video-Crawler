@@ -198,6 +198,7 @@ function sanitizeUrlForFilename( url ) {
  * @returns {Promise<Object>} A promise that resolves to an object containing video metadata or an error object if retrieval fails.
  */
 async function getVideoMetadata( videoUrl ) {
+	videourl = '"' + videoUrl + '"';
 	return new Promise( ( resolve ) => {
 		let cmd = [
 			'ffprobe',
@@ -205,7 +206,7 @@ async function getVideoMetadata( videoUrl ) {
 			'-show_entries',
 			'format=size,duration,bit_rate:stream=codec_name,codec_type,width,height,r_frame_rate,sample_fmt,channels',
 			'-of', 'json',
-			'"' + videoUrl + '"'
+			videoUrl
 		];
 
 		const ffprobe = spawn( cmd[ 0 ], cmd.slice( 1 ) );
